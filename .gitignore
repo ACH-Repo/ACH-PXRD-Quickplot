@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+venv/
+env/
+*.egg-info/
+
+# OS clutter
+desktop.ini
+Thumbs.db
+.DS_Store
+
+# IDE folders
+.vscode/
+.idea/
+
+# TOPAS conversion scratch files (created by read_raw)
+temptemptemp.inp
+temptemptemp.out
+temptemptemp.xy
+
+# Plotter output saved into the working directory
+PXRD_stack.*
