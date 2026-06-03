@@ -18,7 +18,7 @@ from matplotlib.ticker import AutoMinorLocator, MultipleLocator
 from matplotlib.transforms import blended_transform_factory
 
 
-CIF_LOC = r'D:\Workfolder\Nelle\CIF_LOC'
+CIF_LOC = r'D:\Workfolder\<you>\CIF_LOC'
 script_name = pathlib.Path(__file__).name
 
 # Recognised extensions and the reader each one dispatches to. Order also
@@ -51,6 +51,22 @@ SETTINGS = {
 	'label_x_frac': 0.98,        # x position of trace labels in axes coords (0 = left, 1 = right edge).
 	'label_y_pad_frac': 0.01,    # vertical nudge above each trace's baseline, as a fraction of data range.
 	'broadening': 0.1,           # Lorentzian FWHM (in 2theta degrees) applied to simulated CIF patterns.
+
+	# Trace colors. Black and gray are deliberately excluded so they don't clash
+	# with reflection marker lines (which are drawn in shades of black/gray).
+	'trace_color_cycle': ['tab:blue', 'tab:orange', 'tab:green', 'tab:red',
+	                      'tab:purple', 'tab:brown', 'tab:pink',
+	                      'tab:olive', 'tab:cyan'],
+
+	# Default color cycle for reflection marker sets when --reflections is used
+	# without an explicit color. Different shades of black/gray keep multiple
+	# reflection sets visually distinct without competing with the data colors.
+	'reflection_color_cycle': ['black', '#444444', '#777777', '#aaaaaa'],
+	'reflection_linestyle': ':',
+	'reflection_linewidth': 0.7,
+	'reflection_alpha': 0.75,
+	'reflection_label_font_size': 9,
+	'reflection_label_marker': '┊ ',  # ┊ — visual hint at a dotted vertical
 }
 
 
@@ -65,6 +81,48 @@ DEFAULTS = {
 	'title': None,
 	'stack': True,
 	'limit_extension': False,
+}
+
+
+# ==========================================
+# USER OVERRIDES  (for per-project customisation)
+# ==========================================
+# When this script is copied into a project directory to serve as a custom
+# plot recipe, edit the values below instead of passing CLI flags. Anything
+# set to a non-None value overrides BOTH the CLI argument and the default —
+# so `python pxrd_quickplot.py` (no flags) reproduces your customisation.
+#
+# Leave entries as None / empty to fall back to the normal CLI behaviour.
+
+OVERRIDES = {
+	# ---- inputs ----
+	# Explicit list of files (replaces -i and the cwd glob). Plot stack order
+	# follows list order. Bare CIF names resolve against CIF_LOC too.
+	'inputs': None,                  # e.g. ['sample_A.xy', 'sample_B.brml', 'phase.cif']
+
+	# Per-trace colours, aligned with `inputs` above (or with whatever the
+	# script discovers if `inputs` is None). Use None in a slot to keep the
+	# default cycle colour for that trace.
+	'trace_colors': None,            # e.g. ['tab:blue', '#cc0000', None]
+
+	# Per-trace labels, aligned with `inputs`. None = use filename stem.
+	'trace_labels': None,            # e.g. ['Sample A', 'Sample B', 'Reference']
+
+	# ---- overlays ----
+	# Highlight bands as a Python list of tuples (a, b, multiplier, colour).
+	# Mirrors the --highlights syntax. colour may be None for the default red.
+	'highlights': None,              # e.g. [(20, 30, 3, 'blue'), (35, 45, 5, None)]
+
+	# Reflection markers, list of (cif_name, n_top, colour). colour may be None
+	# for the default gray cycle.
+	'reflections': None,             # e.g. [('H2bdc', 10, 'gray'), ('Other', 5, '#444')]
+
+	# ---- axes / output ----
+	'x_range':   None,               # e.g. (5, 50)
+	'title':     None,               # e.g. 'sample-A..D amorphous series'
+	'figsize':   None,               # e.g. (10, 6) — overrides --size
+	'extension': None,               # e.g. 'png' — overrides --extension
+	'silent':    None,               # True / False — overrides --silent
 }
 
 
@@ -91,6 +149,12 @@ parser.add_argument('--stack', action='store_true', default=DEFAULTS['stack'],
                     help='Stack multiple PXRDs (default on).')
 parser.add_argument('-l', '--limit_extension', nargs='+', default=DEFAULTS['limit_extension'],
                     help='Restrict --stack to these extensions (without dot).')
+parser.add_argument('-r', '--reflections', default=None, type=str,
+                    help='Overlay reflection markers from CIFs as fine vertical dotted '
+                         'lines. Format: "(name,N,color),(name,N,color),...". '
+                         'N (count of strongest reflections) defaults to 10; color defaults '
+                         'to a shade of gray. Bare CIF names resolve against CIF_LOC. '
+                         'Useful for highlighting suspected impurity phases.')
 args = parser.parse_args()
 
 
@@ -418,6 +482,105 @@ def apply_highlights(ax, traces, baselines, highlights):
 
 
 # ==========================================
+# REFLECTION MARKERS (--reflections)
+# ==========================================
+
+def parse_reflections(spec):
+	"""Parse e.g. "(MyCIF,10,gray),(Other.cif,5)" → [(name, n_top, color_or_None), ...]."""
+	if not spec:
+		return []
+	out = []
+	for inner in re.findall(r'\(([^()]*)\)', spec):
+		parts = [p.strip() for p in inner.split(',')]
+		# Drop trailing empty parts from "(name,N,)" trailing commas, but keep
+		# empties in the middle so positional meaning is preserved.
+		while parts and parts[-1] == '':
+			parts.pop()
+		if not parts:
+			continue
+		name = parts[0]
+		if not name:
+			print(f'[!] Skipping reflection spec "({inner})": missing CIF name.')
+			continue
+		n_top = 10
+		if len(parts) > 1 and parts[1]:
+			try:
+				n_top = int(parts[1])
+				if n_top <= 0:
+					raise ValueError
+			except ValueError:
+				print(f'[!] Reflection spec "({inner})": N must be a positive integer; '
+				      f'using default {n_top}.')
+		color = parts[2] if len(parts) > 2 and parts[2] else None
+		out.append((name, n_top, color))
+	return out
+
+
+def resolve_reflection_cif(name):
+	"""Resolve a CIF name to an existing path.
+
+	Tries, in order: the literal string; the literal string + .cif; CIF_LOC/name;
+	CIF_LOC/name.cif. Returns the resolved path or None."""
+	name_cif = name if name.lower().endswith('.cif') else name + '.cif'
+	candidates = [name, name_cif,
+	              os.path.join(CIF_LOC, name),
+	              os.path.join(CIF_LOC, name_cif)]
+	for c in candidates:
+		if os.path.exists(c):
+			return c
+	return None
+
+
+def simulate_reflections(cif_path, n_top, two_theta_range):
+	"""Return the 2θ positions of the n_top strongest reflections from a CIF,
+	restricted to the given two_theta range. Sorted ascending in 2θ."""
+	try:
+		from pymatgen.core import Structure
+		from pymatgen.analysis.diffraction.xrd import XRDCalculator
+	except ImportError as e:
+		raise ImportError('Reflection markers need pymatgen installed.') from e
+
+	x_lo, x_hi = float(two_theta_range[0]), float(two_theta_range[1])
+	structure = Structure.from_file(cif_path)
+	calc = XRDCalculator(wavelength=SETTINGS['cif_wavelength'])
+	pattern = calc.get_pattern(structure,
+	                            two_theta_range=(max(x_lo, 1e-6), x_hi))
+	positions = np.asarray(pattern.x, dtype=float)
+	intensities = np.asarray(pattern.y, dtype=float)
+	if positions.size == 0:
+		return np.array([])
+	# Top N strongest, then sort ascending by 2θ.
+	order = np.argsort(-intensities)
+	top = positions[order][:n_top]
+	return np.sort(top)
+
+
+def draw_reflection_lines(ax, ref_sets):
+	"""Draw fine vertical dotted lines for each reflection set and add a
+	stacked label legend just above the axes top-right corner."""
+	if not ref_sets:
+		return
+	for _, positions, color in ref_sets:
+		for p in positions:
+			ax.axvline(p,
+			           color=color,
+			           linestyle=SETTINGS['reflection_linestyle'],
+			           linewidth=SETTINGS['reflection_linewidth'],
+			           alpha=SETTINGS['reflection_alpha'],
+			           zorder=1)
+	# Stacked labels above the axes top edge. The first set sits closest to the
+	# axes; subsequent sets stack upward.
+	for i, (label, _pos, color) in enumerate(ref_sets):
+		y = 1.01 + i * 0.035
+		ax.text(0.99, y,
+		        SETTINGS['reflection_label_marker'] + label,
+		        transform=ax.transAxes,
+		        color=color,
+		        ha='right', va='bottom',
+		        fontsize=SETTINGS['reflection_label_font_size'])
+
+
+# ==========================================
 # STYLING
 # ==========================================
 
@@ -448,10 +611,43 @@ def derive_label(path):
 # MAIN
 # ==========================================
 
+def _apply_overrides_to_args():
+	"""Mutate `args` in place so OVERRIDES win over CLI/defaults.
+
+	Per-trace fields (colors, labels) and the structured overlay lists are not
+	on the argparse namespace; main() reads them straight from OVERRIDES."""
+	# args.input gets handled by collect_input_paths() reading OVERRIDES.
+	if OVERRIDES.get('title') is not None:
+		args.title = OVERRIDES['title']
+	if OVERRIDES.get('figsize') is not None:
+		args.size = OVERRIDES['figsize']
+	if OVERRIDES.get('extension') is not None:
+		args.extension = OVERRIDES['extension']
+	if OVERRIDES.get('silent') is not None:
+		args.silent = OVERRIDES['silent']
+
+
 def main():
-	paths = collect_input_paths()
+	_apply_overrides_to_args()
+
+	# OVERRIDES['inputs'] (if set) replaces both -i and the cwd glob.
+	if OVERRIDES.get('inputs'):
+		paths = []
+		for entry in OVERRIDES['inputs']:
+			if os.path.exists(entry):
+				paths.append(entry)
+				continue
+			cif_candidate = os.path.join(CIF_LOC, entry)
+			if os.path.exists(cif_candidate):
+				paths.append(cif_candidate)
+				continue
+			print(f'[!] Override input not found: {entry} '
+			      f'(also tried {cif_candidate!r})')
+	else:
+		paths = collect_input_paths()
 	if not paths:
-		print('[-] No input files found. Pass -i or place data files in the cwd.')
+		print('[-] No input files found. Pass -i, edit OVERRIDES["inputs"], '
+		      'or place data files in the cwd.')
 		return 1
 
 	vprint(f'[+] Plotting {len(paths)} file(s):')
@@ -531,27 +727,51 @@ def main():
 
 	fig, ax = plt.subplots(figsize=tuple(args.size), layout='constrained')
 
-	# Determine x-range up front so highlight shading respects it. The default
-	# follows the global x-bounds of all (measured + CIF-constrained) data.
-	if SETTINGS['x_range']:
+	# Determine x-range. Precedence: OVERRIDES > SETTINGS > derived from data.
+	if OVERRIDES.get('x_range') is not None:
+		ax.set_xlim(*OVERRIDES['x_range'])
+	elif SETTINGS['x_range']:
 		ax.set_xlim(*SETTINGS['x_range'])
 	else:
 		ax.set_xlim(global_x_lo, global_x_hi)
 
-	highlights = parse_highlights(args.highlights)
+	# Highlights: prefer OVERRIDES (structured tuple list) over the CLI string.
+	if OVERRIDES.get('highlights') is not None:
+		highlights = list(OVERRIDES['highlights'])
+	else:
+		highlights = parse_highlights(args.highlights)
 	traces = apply_highlights(ax, traces, baselines, highlights)
 
-	# Plot each trace.
-	color_cycle = plt.rcParams['axes.prop_cycle'].by_key().get('color', ['C0'])
-	trace_colors = [color_cycle[i % len(color_cycle)] for i in range(len(traces))]
+	# Optional per-trace label override: positional, aligned with input order.
+	if OVERRIDES.get('trace_labels'):
+		label_override = OVERRIDES['trace_labels']
+		traces = [(label_override[i] if i < len(label_override) and label_override[i] else lbl,
+		           x, y) for i, (lbl, x, y) in enumerate(traces)]
+
+	# Plot each trace. We use an explicit color cycle that excludes black/gray
+	# so reflection markers (drawn later in shades of gray) remain visually
+	# distinct from the data. Per-trace OVERRIDES['trace_colors'] entries take
+	# precedence (use None in a slot to keep the default cycle colour).
+	color_cycle = SETTINGS['trace_color_cycle']
+	color_override = OVERRIDES.get('trace_colors') or []
+	trace_colors = []
+	for i in range(len(traces)):
+		c = color_override[i] if i < len(color_override) and color_override[i] else \
+		    color_cycle[i % len(color_cycle)]
+		trace_colors.append(c)
 	for (label, x, y), c in zip(traces, trace_colors):
 		ax.plot(x, y, lw=SETTINGS['line_width'], color=c, label=label)
 
-	# Derive y-limits from the actual plotted data (ax.dataLim is set after
-	# plot() calls), then pad by the configured margin fractions so peaks and
-	# stick tops never touch the frame.
+	# Derive y-limits from the actual plotted data, but also include the
+	# stacking baselines. A trace with a non-zero amorphous background has a
+	# data minimum well above its mathematical baseline, and the trace label
+	# is anchored to that baseline — so excluding baselines from y_range
+	# would leave the bottom label outside the axes.
 	y_lo = float(ax.dataLim.y0)
 	y_hi = float(ax.dataLim.y1)
+	if baselines:
+		y_lo = min(y_lo, min(baselines))
+		y_hi = max(y_hi, max(baselines))
 	y_range = y_hi - y_lo if y_hi > y_lo else 1.0
 	ax.set_ylim(y_lo - SETTINGS['margin_bottom'] * y_range,
 	            y_hi + SETTINGS['margin_top'] * y_range)
@@ -561,12 +781,66 @@ def main():
 	# Works because PXRD intensities are non-negative.
 	trans = blended_transform_factory(ax.transAxes, ax.transData)
 	label_y_pad = SETTINGS['label_y_pad_frac'] * y_range
+	trace_label_artists = []
 	for (label, _x, _y), baseline, c in zip(traces, baselines, trace_colors):
-		ax.text(SETTINGS['label_x_frac'], baseline - label_y_pad, label,
-		        ha='right', va='top',
-		        fontsize=SETTINGS['label_font_size'],
-		        color=c,
-		        transform=trans)
+		txt = ax.text(SETTINGS['label_x_frac'], baseline - label_y_pad, label,
+		              ha='right', va='top',
+		              fontsize=SETTINGS['label_font_size'],
+		              color=c,
+		              transform=trans)
+		trace_label_artists.append(txt)
+
+	# Post-render verification: text height in data units depends on dpi /
+	# axes height / fontsize and can't be predicted analytically, so we draw
+	# once, query the actual bottom of each label, and expand the lower y-limit
+	# if anything still falls below it.
+	fig.canvas.draw()
+	inv = ax.transData.inverted()
+	cur_ymin, cur_ymax = ax.get_ylim()
+	min_label_bottom = float('inf')
+	for txt in trace_label_artists:
+		bbox = txt.get_window_extent()
+		_, y_bottom_data = inv.transform((bbox.x0, bbox.y0))
+		if y_bottom_data < min_label_bottom:
+			min_label_bottom = y_bottom_data
+	if trace_label_artists and min_label_bottom < cur_ymin:
+		pad = (cur_ymax - cur_ymin) * 0.01
+		ax.set_ylim(bottom=min_label_bottom - pad)
+
+	# Reflection markers: simulate the top-N peaks per CIF and overlay them as
+	# fine dotted vertical lines, colour-coded per set, with a label legend
+	# anchored just above the axes top-right corner. OVERRIDES['reflections']
+	# accepts the same tuples as the CLI parser already returns.
+	if OVERRIDES.get('reflections') is not None:
+		ref_specs = list(OVERRIDES['reflections'])
+	else:
+		ref_specs = parse_reflections(args.reflections)
+	ref_sets = []  # list of (display_label, positions_array, color)
+	default_ref_colors = SETTINGS['reflection_color_cycle']
+	for i, (name, n_top, color) in enumerate(ref_specs):
+		resolved = resolve_reflection_cif(name)
+		if resolved is None:
+			tried_loc = os.path.join(
+				CIF_LOC, name if name.lower().endswith('.cif') else name + '.cif')
+			print(f'[!] Reflection CIF not found: {name}  '
+			      f'(also tried {tried_loc!r})')
+			continue
+		try:
+			positions = simulate_reflections(
+				resolved, n_top, (global_x_lo, global_x_hi))
+		except Exception as e:
+			print(f'[!] Reflection simulation failed for {name}: {e}')
+			continue
+		if positions.size == 0:
+			print(f'[!] {name}: no reflections in 2θ range '
+			      f'[{global_x_lo:.2f}, {global_x_hi:.2f}].')
+			continue
+		c = color or default_ref_colors[i % len(default_ref_colors)]
+		ref_sets.append((Path(resolved).stem, positions, c))
+		vprint(f'    + reflections from {resolved}: '
+		       f'{positions.size} lines, color={c}')
+
+	draw_reflection_lines(ax, ref_sets)
 
 	# Title.
 	if args.title:

@@ -2,7 +2,7 @@
 
 A one-shot script for plotting stacks of powder X-ray diffractograms from the formats a chemistry lab actually produces — Bruker `.brml`, Riet7 `.dat`, plain `.xy / .txt / .csv`, TOPAS-convertible `.raw`, and simulated `.cif` patterns — all on a single axis.
 
-![screenshot of four PXRD patterns stacked on one axis, with two coloured highlight bands and "x 3" / "x 5" multiplication labels at the top](examples/screenshot.png)
+![screenshot of three measured PXRD patterns stacked on one axis with a × 3 highlight band and the top-10 reflections of an H2bdc CIF overlaid as fine dotted vertical lines, plus a colour-coded label above the top-right corner](examples/screenshot.png)
 
 ## Quick start
 
@@ -19,9 +19,9 @@ By default the script collects every readable file in the current directory, nor
 ```
 $ python pxrd_quickplot.py -s -v -x png --highlights "((20,30,3,blue),(35,45,5))"
 [+] Plotting 4 file(s):
-    - FN-03-12_300_001_00000.xy
-    - CN-61-F-0.20-dry.dat
-    - CN-103-P4-cryst.brml
+    - sample-C_300_001_00000.xy
+    - sample-B-F-0.20-dry.dat
+    - sample-A-P4-cryst.brml
     - H2bdc.cif
 [+] Saved -> PXRD_stack.png
 ```
@@ -33,6 +33,14 @@ The `--highlights` argument zooms the chosen 2θ regions on every trace by the g
 | `(20, 30, 3, blue)` | × 3 | blue |
 | `(35, 45, 5)` | × 5 | red (default) |
 
+The `--reflections` argument overlays the strongest simulated peaks of one or more CIFs as fine dotted vertical lines, useful for flagging suspected impurity phases:
+
+```
+python pxrd_quickplot.py -s -x png -r "(H2bdc,10),(other_phase,5,#aa0000)"
+```
+
+Each set gets a small colour-coded label above the top-right corner. Bare CIF names resolve against `CIF_LOC` first, then the current directory.
+
 ## CLI reference
 
 | Flag | Default | Purpose |
@@ -41,6 +49,7 @@ The `--highlights` argument zooms the chosen 2θ regions on every trace by the g
 | `--stack` | on | Stack all collected patterns on one axis. |
 | `-l`, `--limit_extension EXT ...` | off | Restrict the cwd glob to specific extensions (without the dot). |
 | `-m`, `--highlights "((a,b,N,color),...)"` | off | Zoom-scale 2θ intervals by `N` and shade them. Colour optional. |
+| `-r`, `--reflections "(CIF,N,color),..."` | off | Overlay the N strongest reflections of one or more CIFs as fine dotted vertical lines. `N` defaults to 10, colour to a shade of gray. CIF names resolve against `CIF_LOC` too. |
 | `-t`, `--title [TEXT]` | off | Set a title; `-t` alone auto-generates one from the filenames. |
 | `--size W H` | `7 5` | Plot size in inches. |
 | `-x`, `--extension EXT` | `svg` | Output extension when saving. |
@@ -56,6 +65,7 @@ The `--highlights` argument zooms the chosen 2θ regions on every trace by the g
 - **Simulates CIF patterns** with pymatgen's `XRDCalculator`, convolved with a Lorentzian of `--broadening` FWHM (default 0.1°). The 2θ range of the simulated pattern is automatically tied to the global x-range of the measured data so the phases line up.
 - **Normalises and offsets** each pattern (individual normalisation by default; CENTER stacking centred around y=0).
 - **Highlights with multiplications.** `--highlights "((a,b,N,color),...)"` scales each trace's intensity by `N` inside the band `[a, b]`, draws a translucent shaded rectangle, and labels the band `x N` at the top — useful for showing low-intensity features.
+- **Reflection markers from CIFs.** `--reflections "(CIF,N,color),..."` overlays the `N` strongest simulated reflections of one or more crystal structures as fine dotted vertical lines (default `N` = 10, default colour a shade of gray, default trace colour cycle no longer includes black/gray so the markers stay distinct). Each set gets a small colour-coded label above the top-right corner. Handy for flagging suspected impurity phases in a measurement.
 - **Auto-margins.** Y-limits are computed from `ax.dataLim` and padded by configurable top/bottom fractions (5% default) so peaks don't touch the frame.
 - **Robust to bad files.** A file that fails to read prints `[!] Skipping <path>: <reason>` and the rest of the batch carries on. Unrecognised extensions, empty files, corrupt ZIPs, malformed CIFs, etc. are all caught.
 
@@ -79,15 +89,36 @@ pip install numpy matplotlib pymatgen
 ACH-PXRD-Quickplot/
 ├── pxrd_quickplot.py          # the whole program — CLI, readers, plotting
 ├── examples/
-│   ├── CN-103-P4-cryst.brml          # Bruker measurement
-│   ├── CN-61-F-0.20-dry.dat          # Riet7 measurement
-│   ├── FN-03-12_300_001_00000.xy     # plain two-column data
+│   ├── sample-A-P4-cryst.brml          # Bruker measurement
+│   ├── sample-B-F-0.20-dry.dat          # Riet7 measurement
+│   ├── sample-C_300_001_00000.xy     # plain two-column data
 │   ├── H2bdc.cif                     # CIF for simulated pattern
 │   └── screenshot.png                # the screenshot used in this README
 ├── .gitignore
 ├── .gitattributes
 └── README.md
 ```
+
+## Copy-paste recipes (manual customisation)
+
+For one-off plots that need more than CLI flags can express — explicit input order, per-trace colours and labels, structured highlight/reflection lists, locked axes — copy `pxrd_quickplot.py` into your project folder and edit the `OVERRIDES` dict near the top:
+
+```python
+OVERRIDES = {
+    'inputs':        ['sample_A.xy', 'sample_B.brml', 'phase.cif'],
+    'trace_colors':  ['tab:blue', '#cc0000', None],          # None = default cycle
+    'trace_labels':  ['Sample A', 'Sample B', 'Reference'],  # None entries = filename stem
+    'highlights':    [(20, 30, 3, 'blue'), (35, 45, 5, None)],
+    'reflections':   [('H2bdc', 10, 'gray'), ('Other', 5, '#444')],
+    'x_range':       (5, 50),
+    'title':         'sample-A..D amorphous series',
+    'figsize':       (10, 6),
+    'extension':     'png',
+    'silent':        True,
+}
+```
+
+Anything set to a non-`None` value overrides BOTH the CLI flag and the SETTINGS default, so the customised copy reproduces the plot from a bare `python pxrd_quickplot.py` invocation. Leave fields as `None` to keep CLI-driven behaviour. This pairs well with the shim from "Run from anywhere" below — the shim stays generic, the per-project copy is the recipe.
 
 ## Run from anywhere (optional)
 
@@ -100,7 +131,7 @@ Create `pxp.cmd` containing:
 ```
 
 - `[PYTHON_CMD]` — `python` (or `py` if you use the launcher).
-- `[FULL_PATH]` — the absolute path to this repo, e.g. `C:\Users\chris\Documents\Github\ACH-PXRD-Quickplot`.
+- `[FULL_PATH]` — the absolute path to this repo, e.g. `C:\Users\<you>\Documents\Github\ACH-PXRD-Quickplot`.
 - The folder containing `pxp.cmd` has to be on your Windows `PATH`. If you don't already have one, a conventional choice is `C:\Users\<you>\bin\` — create it, drop `pxp.cmd` inside, then add that folder to `PATH` via *System Properties → Environment Variables*.
 
 Then:
@@ -130,7 +161,11 @@ works from any prompt.
 
 **Highlights / multiplications.** Parsed from the `--highlights` string with `re.findall(r'\(([^()]*)\)', spec)`, then for each `(a, b, N, color)` tuple the script multiplies y inside `[a, b]` *around each trace's baseline* (so the multiplication doesn't shift the zero level) and overlays a translucent `axvspan` plus an `x N` label at the top of the axes.
 
-**Y-limits and labels.** After plotting, `ax.dataLim.y0/y1` gives the true extents; those are padded by `margin_top` / `margin_bottom` fractions of the data range (5% each by default) so peaks never touch the frame. Trace labels sit just *below* each baseline near the right edge — the dead zone of any positive-only PXRD trace — coloured to match the trace.
+**Reflection markers.** `--reflections` parses with the same tuple-grammar regex. Each `(name, N, color)` triple resolves the CIF (literal path → CIF_LOC → with/without `.cif` extension), runs pymatgen's `XRDCalculator.get_pattern` restricted to the global x-range, sorts the peaks by intensity descending, takes the top `N`, and draws each remaining peak as an `axvline` in the chosen colour with `linestyle=':'`. A small colour-coded label is placed at axes coords `(0.99, 1.01 + i·0.035)` so multiple sets stack upward above the top-right corner. The default trace colour cycle has been shrunk to `tab:blue/orange/green/red/purple/brown/pink/olive/cyan` (no `tab:gray`) so the gray reflection markers always stand out from the data.
+
+**Y-limits and labels.** After plotting, `ax.dataLim.y0/y1` gives the true extents; **the stacking baselines are also folded in** (`min(baselines)`, `max(baselines)`) so the margin pad always extends below the lowest baseline — important for traces with high amorphous background where `dataLim.y0` sits well above the mathematical baseline that the label is anchored to. Then those bounds are padded by `margin_top` / `margin_bottom` fractions of the resulting range (5% each by default). After labels are placed, the figure is drawn once, each label's bbox is converted to data coords, and the lower y-limit is nudged downward if any label still hangs out — a belt-and-braces check that handles unusual font sizes and figure dimensions. Trace labels themselves sit just *below* each baseline near the right edge — the dead zone of any positive-only PXRD trace — coloured to match the trace.
+
+**OVERRIDES.** A dict at the top of the script holds optional overrides that win over both CLI flags and SETTINGS defaults. `main()` calls `_apply_overrides_to_args()` first to push the simple ones (`title`, `figsize`, `extension`, `silent`) onto the argparse `args` namespace, then reads the structured ones (`inputs`, `trace_colors`, `trace_labels`, `highlights`, `reflections`, `x_range`) directly from `OVERRIDES` at the relevant points in the plotting flow. This means a customised copy of the script is a self-contained plot recipe: `python pxrd_quickplot.py` with no flags reproduces the customised plot.
 
 </details>
 
