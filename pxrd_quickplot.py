@@ -52,21 +52,25 @@ SETTINGS = {
 	'label_y_pad_frac': 0.01,    # vertical nudge above each trace's baseline, as a fraction of data range.
 	'broadening': 0.1,           # Lorentzian FWHM (in 2theta degrees) applied to simulated CIF patterns.
 
-	# Trace colors. Black and gray are deliberately excluded so they don't clash
-	# with reflection marker lines (which are drawn in shades of black/gray).
+	# Trace colors. The reflection marker palette is kept disjoint from this
+	# list so dotted reflection lines never read as a data trace.
 	'trace_color_cycle': ['tab:blue', 'tab:orange', 'tab:green', 'tab:red',
 	                      'tab:purple', 'tab:brown', 'tab:pink',
 	                      'tab:olive', 'tab:cyan'],
 
 	# Default color cycle for reflection marker sets when --reflections is used
-	# without an explicit color. Different shades of black/gray keep multiple
-	# reflection sets visually distinct without competing with the data colors.
-	'reflection_color_cycle': ['black', '#444444', '#777777', '#aaaaaa'],
+	# without an explicit color. Distinct saturated hues that are NOT in
+	# `trace_color_cycle`, so reflection lines never read as a data trace.
+	# (At a thin dotted line width, shades of gray are indistinguishable from
+	# each other and from black — so we use clearly different colours instead.)
+	'reflection_color_cycle': ['black', 'magenta', 'teal', 'goldenrod', 'darkviolet'],
 	'reflection_linestyle': ':',
 	'reflection_linewidth': 0.7,
 	'reflection_alpha': 0.75,
 	'reflection_label_font_size': 9,
 	'reflection_label_marker': '┊ ',  # ┊ — visual hint at a dotted vertical
+	'reflection_label_inset': 0.015,  # gap from the top/right axes edges (axes-fraction)
+	'reflection_label_step': 0.045,   # vertical spacing between stacked set labels (axes-fraction)
 }
 
 
@@ -108,14 +112,19 @@ OVERRIDES = {
 	# Per-trace labels, aligned with `inputs`. None = use filename stem.
 	'trace_labels': None,            # e.g. ['Sample A', 'Sample B', 'Reference']
 
+	# Stacking order, top-to-bottom, as input indices. The value at display
+	# position i is the input index drawn there. e.g. [0, 2, 1, 3] keeps input
+	# 0 on top, then draws inputs 2, 1, 3 below it. None = natural input order.
+	'order': None,                   # e.g. [0, 2, 1, 3]
+
 	# ---- overlays ----
 	# Highlight bands as a Python list of tuples (a, b, multiplier, colour).
 	# Mirrors the --highlights syntax. colour may be None for the default red.
 	'highlights': None,              # e.g. [(20, 30, 3, 'blue'), (35, 45, 5, None)]
 
 	# Reflection markers, list of (cif_name, n_top, colour). colour may be None
-	# for the default gray cycle.
-	'reflections': None,             # e.g. [('H2bdc', 10, 'gray'), ('Other', 5, '#444')]
+	# to draw from the default reflection palette.
+	'reflections': None,             # e.g. [('H2bdc', 10, 'magenta'), ('Other', 5, 'teal')]
 
 	# ---- axes / output ----
 	'x_range':   None,               # e.g. (5, 50)
@@ -153,8 +162,15 @@ parser.add_argument('-r', '--reflections', default=None, type=str,
                     help='Overlay reflection markers from CIFs as fine vertical dotted '
                          'lines. Format: "(name,N,color),(name,N,color),...". '
                          'N (count of strongest reflections) defaults to 10; color defaults '
-                         'to a shade of gray. Bare CIF names resolve against CIF_LOC. '
-                         'Useful for highlighting suspected impurity phases.')
+                         'to a distinct hue not used by the data traces. Bare CIF names '
+                         'resolve against CIF_LOC. Useful for highlighting impurity phases.')
+parser.add_argument('--labels', nargs='+', default=None,
+                    help='Per-trace labels, in input order. Use _ (a single underscore) '
+                         'in a slot to keep that trace\'s filename stem.')
+parser.add_argument('--order', default=None, type=str,
+                    help='Reorder the stack top-to-bottom by input index. The i-th value '
+                         'is the input index drawn at position i. e.g. "0,2,1,3" keeps '
+                         'input 0 on top, then draws inputs 2, 1, 3 below it.')
 args = parser.parse_args()
 
 
@@ -482,11 +498,42 @@ def apply_highlights(ax, traces, baselines, highlights):
 
 
 # ==========================================
+# STACK ORDERING (--order)
+# ==========================================
+
+def parse_order(spec):
+	"""Parse "0,2,1,3" (commas and/or whitespace) into [0, 2, 1, 3].
+
+	Returns the list of ints, or None on a parse error."""
+	if not spec:
+		return None
+	try:
+		return [int(tok) for tok in re.split(r'[,\s]+', spec.strip()) if tok]
+	except ValueError:
+		print(f'[!] --order: could not parse "{spec}" as integers; ignoring.')
+		return None
+
+
+def validate_order(order, n):
+	"""Ensure `order` is a permutation of range(n).
+
+	Returns the order list, or None if it isn't a valid permutation (in which
+	case a warning is printed and the caller should fall back to natural order)."""
+	if order is None:
+		return None
+	if sorted(order) != list(range(n)):
+		print(f'[!] order {list(order)} is not a permutation of 0..{n - 1} '
+		      f'({n} traces read); keeping natural order.')
+		return None
+	return list(order)
+
+
+# ==========================================
 # REFLECTION MARKERS (--reflections)
 # ==========================================
 
 def parse_reflections(spec):
-	"""Parse e.g. "(MyCIF,10,gray),(Other.cif,5)" → [(name, n_top, color_or_None), ...]."""
+	"""Parse e.g. "(MyCIF,10,magenta),(Other.cif,5)" → [(name, n_top, color_or_None), ...]."""
 	if not spec:
 		return []
 	out = []
@@ -557,7 +604,7 @@ def simulate_reflections(cif_path, n_top, two_theta_range):
 
 def draw_reflection_lines(ax, ref_sets):
 	"""Draw fine vertical dotted lines for each reflection set and add a
-	stacked label legend just above the axes top-right corner."""
+	stacked label legend just inside the axes top-right corner."""
 	if not ref_sets:
 		return
 	for _, positions, color in ref_sets:
@@ -568,15 +615,19 @@ def draw_reflection_lines(ax, ref_sets):
 			           linewidth=SETTINGS['reflection_linewidth'],
 			           alpha=SETTINGS['reflection_alpha'],
 			           zorder=1)
-	# Stacked labels above the axes top edge. The first set sits closest to the
-	# axes; subsequent sets stack upward.
+	# Stacked labels just INSIDE the top-right corner so they stay within the
+	# plotting box. The first set sits at the top; subsequent sets stack
+	# downward. The top-right interior of a stacked PXRD is the topmost trace's
+	# high-angle tail, which is normally flat, so labels rarely collide with data.
+	pad = SETTINGS['reflection_label_inset']
+	step = SETTINGS['reflection_label_step']
 	for i, (label, _pos, color) in enumerate(ref_sets):
-		y = 1.01 + i * 0.035
-		ax.text(0.99, y,
+		y = (1.0 - pad) - i * step
+		ax.text(1.0 - pad, y,
 		        SETTINGS['reflection_label_marker'] + label,
 		        transform=ax.transAxes,
 		        color=color,
-		        ha='right', va='bottom',
+		        ha='right', va='top',
 		        fontsize=SETTINGS['reflection_label_font_size'])
 
 
@@ -718,6 +769,41 @@ def main():
 		print('[-] Nothing read successfully.')
 		return 1
 
+	# The next three steps all operate in INPUT order (i.e. aligned with -i /
+	# OVERRIDES['inputs']), so labels and colours stay attached to their source
+	# file. Reordering is applied last and permutes everything together — so the
+	# user supplies --labels / --colors / --order all in the same input order.
+
+	# --- per-trace labels: OVERRIDES['trace_labels'] wins over --labels. ---
+	# A slot value of None or '_' keeps that trace's filename-stem label.
+	label_override = OVERRIDES.get('trace_labels') or args.labels
+	if label_override:
+		traces = [((label_override[i] if i < len(label_override)
+		            and label_override[i] not in (None, '_') else lbl), x, y)
+		          for i, (lbl, x, y) in enumerate(traces)]
+
+	# --- per-trace colours: OVERRIDES['trace_colors'] wins over default cycle. ---
+	# Computed here (input order) so a colour stays with its trace through a
+	# reorder. The trace cycle is disjoint from the reflection palette so the
+	# two never collide.
+	color_cycle = SETTINGS['trace_color_cycle']
+	color_override = OVERRIDES.get('trace_colors') or []
+	trace_colors = [color_override[i] if i < len(color_override) and color_override[i]
+	                else color_cycle[i % len(color_cycle)]
+	                for i in range(len(traces))]
+
+	# --- reorder the stack top-to-bottom: OVERRIDES['order'] wins over --order. ---
+	# Indices refer to successfully-read traces in input order. The value at
+	# position i is the input index drawn at display position i.
+	order = OVERRIDES.get('order')
+	if order is None and args.order:
+		order = parse_order(args.order)
+	order = validate_order(order, len(traces))
+	if order is not None:
+		traces = [traces[i] for i in order]
+		trace_colors = [trace_colors[i] for i in order]
+		vprint(f'[+] Stack order (top->bottom): {order}')
+
 	traces = normalize_traces(traces)
 
 	# Only stack if more than one trace and --stack is set; for a single trace
@@ -742,23 +828,7 @@ def main():
 		highlights = parse_highlights(args.highlights)
 	traces = apply_highlights(ax, traces, baselines, highlights)
 
-	# Optional per-trace label override: positional, aligned with input order.
-	if OVERRIDES.get('trace_labels'):
-		label_override = OVERRIDES['trace_labels']
-		traces = [(label_override[i] if i < len(label_override) and label_override[i] else lbl,
-		           x, y) for i, (lbl, x, y) in enumerate(traces)]
-
-	# Plot each trace. We use an explicit color cycle that excludes black/gray
-	# so reflection markers (drawn later in shades of gray) remain visually
-	# distinct from the data. Per-trace OVERRIDES['trace_colors'] entries take
-	# precedence (use None in a slot to keep the default cycle colour).
-	color_cycle = SETTINGS['trace_color_cycle']
-	color_override = OVERRIDES.get('trace_colors') or []
-	trace_colors = []
-	for i in range(len(traces)):
-		c = color_override[i] if i < len(color_override) and color_override[i] else \
-		    color_cycle[i % len(color_cycle)]
-		trace_colors.append(c)
+	# Plot each trace (colours computed above, aligned through the reorder).
 	for (label, x, y), c in zip(traces, trace_colors):
 		ax.plot(x, y, lw=SETTINGS['line_width'], color=c, label=label)
 
